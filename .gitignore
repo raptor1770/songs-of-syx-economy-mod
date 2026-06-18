@@ -1,2 +1,6 @@
 .idea
 target
+.vscode
+snake2d/
+util/
+view/
