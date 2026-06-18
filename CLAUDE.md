@@ -184,7 +184,7 @@ Column header row uses `RENDEROBJ.RenderImp` (non-interactive) and renders `GTex
 - [x] Milestone 3 — Scrollable resource panel (icon + name, by category) opens on ECON click
 - [x] Milestone 4 — Stored, Fill%, Prod/d, Cons/d, Net/d columns with live GStat cells
 - [x] Milestone 5 — Runway column + Status ⚑ flag (deficit / low runway / near-overflow / out-of-stock)
-- [ ] Milestone 6 — Sort & filter (click-to-sort, negative-net/food-only filters, search box)
+- [x] Milestone 6 — Sort & filter (click-to-sort, negative-net/food-only filters, search box)
 - [ ] Milestone 7 — Loss/economic columns: Spoil/d, Maint/d, Import/Export/d, Δ7d trend
 - [ ] Milestone 8 — Trade-aware pricing: Sell@now, Best@avail, opportunity flag, hover + click-through
 - [ ] Milestone 9 — Totals row: Σ Value, Σ Net gold/day, days-of-food
