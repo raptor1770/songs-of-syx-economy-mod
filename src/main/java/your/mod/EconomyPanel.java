@@ -1,6 +1,9 @@
 package your.mod;
 
 import game.GAME;
+import game.faction.FACTIONS;
+import game.faction.FResources.RTYPE;
+import game.faction.npc.FactionNPC;
 import init.resources.RESOURCE;
 import init.resources.RESOURCES;
 import init.sprite.UI.Icon;
@@ -10,7 +13,6 @@ import settlement.room.industry.module.RoomProduction.Source;
 import snake2d.SPRITE_RENDERER;
 import snake2d.util.gui.GUI_BOX;
 import snake2d.util.gui.GuiSection;
-import snake2d.util.gui.Hoverable.HOVERABLE;
 import snake2d.util.gui.clickable.CLICKABLE;
 import snake2d.util.gui.renderable.RENDEROBJ;
 import snake2d.util.sprite.text.StringInputSprite;
@@ -22,7 +24,9 @@ import util.gui.misc.GStat;
 import util.gui.misc.GText;
 import util.gui.table.GScrollRows;
 import util.info.GFORMAT;
+import view.main.VIEW;
 import view.ui.manage.IFullView;
+import world.region.RD;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -31,18 +35,26 @@ import java.util.List;
 
 public final class EconomyPanel extends IFullView {
 
-    private enum SortCol { NAME, STORED, FILL, NET30, HIST_RW, PROJ_RW, STATUS }
+    private enum SortCol { NAME, STORED, FILL, NET30, HIST_RW, PROJ_RW, STATUS, SPOIL, MAINT, IMPORT, EXPORT, DELTA7, SELL_NOW, BEST_AVAIL }
 
-    private static final int COL_ICON    = 0;
-    private static final int COL_NAME    = Icon.S + 8;
-    private static final int COL_STORED  = 210;
-    private static final int COL_FILL    = 285;
-    private static final int COL_NET30   = 340;
-    private static final int COL_HIST_RW = 430;
-    private static final int COL_PROJ_RW = 520;
-    private static final int COL_STATUS  = 610;
-    private static final int COL_W       = 85;
-    private static final int ROW_H       = Icon.S + 8;
+    private static final int COL_ICON     = 0;
+    private static final int COL_NAME     = Icon.S + 8;
+    private static final int COL_STORED   = 210;
+    private static final int COL_FILL     = 285;
+    private static final int COL_NET30    = 340;
+    private static final int COL_HIST_RW  = 430;
+    private static final int COL_PROJ_RW  = 520;
+    private static final int COL_STATUS   = 610;
+    private static final int STATUS_COL_W = 80;
+    private static final int COL_SPOIL    = 700;
+    private static final int COL_MAINT    = 790;
+    private static final int COL_IMPORT   = 880;
+    private static final int COL_EXPORT   = 970;
+    private static final int COL_DELTA7   = 1060;
+    private static final int COL_SELL     = 1150;
+    private static final int COL_AVG      = 1235;
+    private static final int COL_W        = 85;
+    private static final int ROW_H        = Icon.S + 8;
     private static final int SEARCH_CHARS = 20;
 
     private static final int    STATUS_OK      = 0;
@@ -154,7 +166,14 @@ public final class EconomyPanel extends IFullView {
         addSortCol(row, "Net/30d",   SortCol.NET30,   COL_NET30,   COL_W);
         addSortCol(row, "Hist.Run",  SortCol.HIST_RW, COL_HIST_RW, COL_W);
         addSortCol(row, "Proj.Run",  SortCol.PROJ_RW, COL_PROJ_RW, COL_W);
-        addSortCol(row, "Status",    SortCol.STATUS,  COL_STATUS,  WIDTH - COL_STATUS);
+        addSortCol(row, "Status",    SortCol.STATUS,  COL_STATUS,  STATUS_COL_W);
+        addSortCol(row, "Spoil/d",   SortCol.SPOIL,    COL_SPOIL,   COL_W);
+        addSortCol(row, "Maint/d",   SortCol.MAINT,    COL_MAINT,   COL_W);
+        addSortCol(row, "Import/d",  SortCol.IMPORT,   COL_IMPORT,  COL_W);
+        addSortCol(row, "Export/d",  SortCol.EXPORT,   COL_EXPORT,  COL_W);
+        addSortCol(row, "Net/7d",    SortCol.DELTA7,   COL_DELTA7,  COL_W);
+        addSortCol(row, "Sell@now",   SortCol.SELL_NOW,   COL_SELL, COL_W);
+        addSortCol(row, "Best@avail", SortCol.BEST_AVAIL, COL_AVG,  COL_W);
         return row;
     }
 
@@ -235,6 +254,27 @@ public final class EconomyPanel extends IFullView {
             case STATUS:
                 cmp = Comparator.comparingInt(rr -> computeStatus(rr.res));
                 break;
+            case SPOIL:
+                cmp = Comparator.comparingLong(rr -> lastDayOut(RTYPE.SPOILAGE, rr.res));
+                break;
+            case MAINT:
+                cmp = Comparator.comparingLong(rr -> lastDayOut(RTYPE.MAINTENANCE, rr.res));
+                break;
+            case IMPORT:
+                cmp = Comparator.comparingLong(rr -> lastDayIn(RTYPE.TRADE, rr.res));
+                break;
+            case EXPORT:
+                cmp = Comparator.comparingLong(rr -> lastDayOut(RTYPE.TRADE, rr.res));
+                break;
+            case DELTA7:
+                cmp = Comparator.comparingLong(rr -> avg7dNet(rr.res));
+                break;
+            case SELL_NOW:
+                cmp = Comparator.comparingInt(rr -> sellNow(rr.res));
+                break;
+            case BEST_AVAIL:
+                cmp = Comparator.comparingInt(rr -> bestAvail(rr.res));
+                break;
             default: // NAME descending
                 cmp = Comparator.comparing(rr -> rr.res.name.toString());
                 break;
@@ -275,6 +315,40 @@ public final class EconomyPanel extends IFullView {
         return stored <= 0 ? 0 : stored / -net;
     }
 
+    private static long lastDayIn(RTYPE type, RESOURCE res) {
+        var h = GAME.player().res().in(type).history(res.tr());
+        return h.historyRecords() > 1 ? (long) h.get(1) : 0L;
+    }
+
+    private static long lastDayOut(RTYPE type, RESOURCE res) {
+        var h = GAME.player().res().out(type).history(res.tr());
+        return h.historyRecords() > 1 ? (long) h.get(1) : 0L;
+    }
+
+    private static int sellNow(RESOURCE res) {
+        return FACTIONS.player().trade.pricesSell.get(res.tr());
+    }
+
+    private static int bestAvail(RESOURCE res) {
+        int best = 0;
+        for (int i = 0; i < FACTIONS.NPCs().size(); i++) {
+            FactionNPC ff = FACTIONS.NPCs().get(i);
+            if (!ff.isActive() || !RD.DIST().reachable(ff)) continue;
+            int p = ff.res(res.tr()).priceBuyP();
+            if (p > best) best = p;
+        }
+        return best;
+    }
+
+    private static long avg7dNet(RESOURCE res) {
+        var hist = GAME.player().res().total().history(res.tr());
+        int days = Math.min(7, hist.historyRecords() - 1);
+        if (days <= 0) return 0;
+        long total = 0;
+        for (int i = 1; i <= days; i++) total += hist.get(i);
+        return total / days;
+    }
+
     private static int computeStatus(RESOURCE res) {
         double stored = SETT.ROOMS().STOCKPILE.tally().amountTotal(res);
         if (stored <= 0) return STATUS_EMPTY;
@@ -296,7 +370,7 @@ public final class EconomyPanel extends IFullView {
 
     // ── ResourceRow ──────────────────────────────────────────────────────────
 
-    private class ResourceRow extends HOVERABLE.HoverableAbs {
+    private class ResourceRow extends CLICKABLE.ClickableAbs {
         final RESOURCE res;
         private final GText nameText;
         private final GStat storedStat;
@@ -308,6 +382,13 @@ public final class EconomyPanel extends IFullView {
         private final GText statusLowText;
         private final GText statusDeficitText;
         private final GText statusFullText;
+        private final GStat spoilStat;
+        private final GStat maintStat;
+        private final GStat importStat;
+        private final GStat exportStat;
+        private final GStat delta7Stat;
+        private final GStat sellStat;
+        private final GStat avgStat;
 
         ResourceRow(RESOURCE res) {
             super(WIDTH, ROW_H);
@@ -354,10 +435,58 @@ public final class EconomyPanel extends IFullView {
             statusLowText     = new GText(UI.FONT().S, "LOW").errorify();
             statusDeficitText = new GText(UI.FONT().S, "DEFICIT").warnify();
             statusFullText    = new GText(UI.FONT().S, "NEAR FULL").warnify();
+            spoilStat = new GStat() {
+                @Override public void update(GText text) {
+                    long v = lastDayOut(RTYPE.SPOILAGE, res);
+                    if (v > 0) GFORMAT.i(text, v);
+                }
+            };
+            maintStat = new GStat() {
+                @Override public void update(GText text) {
+                    long v = lastDayOut(RTYPE.MAINTENANCE, res);
+                    if (v > 0) GFORMAT.i(text, v);
+                }
+            };
+            importStat = new GStat() {
+                @Override public void update(GText text) {
+                    long v = lastDayIn(RTYPE.TRADE, res);
+                    if (v > 0) GFORMAT.i(text, v);
+                }
+            };
+            exportStat = new GStat() {
+                @Override public void update(GText text) {
+                    long v = lastDayOut(RTYPE.TRADE, res);
+                    if (v > 0) GFORMAT.i(text, v);
+                }
+            };
+            delta7Stat = new GStat() {
+                @Override public void update(GText text) {
+                    GFORMAT.iIncr(text, avg7dNet(res));
+                }
+            };
+            sellStat = new GStat() {
+                @Override public void update(GText text) {
+                    int price = sellNow(res);
+                    if (price <= 0) return;
+                    text.normalify();
+                    GFORMAT.i(text, price);
+                }
+            };
+            avgStat = new GStat() {
+                @Override public void update(GText text) {
+                    int best = bestAvail(res);
+                    if (best <= 0) return;
+                    int now  = sellNow(res);
+                    if (best > now) text.color(GCOLOR.T().IGOOD);
+                    else text.normalify();
+                    GFORMAT.i(text, best);
+                }
+            };
+            clickActionSet(() -> VIEW.UI().goods.detail(res, GAME.player()));
         }
 
         @Override
-        protected void render(SPRITE_RENDERER r, float ds, boolean isHovered) {
+        protected void render(SPRITE_RENDERER r, float ds, boolean isActive, boolean isSelected, boolean isHovered) {
             int x     = body.x1();
             int y1    = body.y1();
             int y2    = body.y2();
@@ -373,6 +502,14 @@ public final class EconomyPanel extends IFullView {
 
             GText flag = statusFlag(computeStatus(res));
             if (flag != null) flag.render(r, x + COL_STATUS, yText);
+
+            spoilStat.render(r,  x + COL_SPOIL,  x + COL_SPOIL  + COL_W, y1, y2);
+            maintStat.render(r,  x + COL_MAINT,  x + COL_MAINT  + COL_W, y1, y2);
+            importStat.render(r, x + COL_IMPORT, x + COL_IMPORT + COL_W, y1, y2);
+            exportStat.render(r, x + COL_EXPORT, x + COL_EXPORT + COL_W, y1, y2);
+            delta7Stat.render(r, x + COL_DELTA7, x + COL_DELTA7 + COL_W, y1, y2);
+            sellStat.render(r,   x + COL_SELL,   x + COL_SELL   + COL_W, y1, y2);
+            avgStat.render(r,    x + COL_AVG,    x + COL_AVG    + COL_W, y1, y2);
         }
 
         @Override
@@ -384,9 +521,45 @@ public final class EconomyPanel extends IFullView {
             for (Source s : SETT.ROOMS().PROD.producers(res)) prod += (long) s.am();
             long cons = 0;
             for (Source s : SETT.ROOMS().PROD.consumers(res)) cons += (long) s.am();
-            b.textL("Prod/d"); b.tab(6); b.add(GFORMAT.i(b.text(), prod));
+            b.textL("Prod/d");   b.tab(6); b.add(GFORMAT.i(b.text(), prod));
             b.NL();
-            b.textL("Cons/d"); b.tab(6); b.add(GFORMAT.i(b.text(), cons));
+            b.textL("Cons/d");   b.tab(6); b.add(GFORMAT.i(b.text(), cons));
+            long spoil = lastDayOut(RTYPE.SPOILAGE, res);
+            if (spoil > 0) {
+                b.NL();
+                b.textL("Spoil/d"); b.tab(6); b.add(GFORMAT.i(b.text(), spoil));
+            }
+            long maint = lastDayOut(RTYPE.MAINTENANCE, res);
+            if (maint > 0) {
+                b.NL();
+                b.textL("Maint/d"); b.tab(6); b.add(GFORMAT.i(b.text(), maint));
+            }
+            long imp = lastDayIn(RTYPE.TRADE, res);
+            if (imp > 0) {
+                b.NL();
+                b.textL("Import/d"); b.tab(6); b.add(GFORMAT.i(b.text(), imp));
+            }
+            long exp = lastDayOut(RTYPE.TRADE, res);
+            if (exp > 0) {
+                b.NL();
+                b.textL("Export/d"); b.tab(6); b.add(GFORMAT.i(b.text(), exp));
+            }
+            b.NL(8);
+            int sell = sellNow(res);
+            int best = bestAvail(res);
+            b.textL("Sell@now"); b.tab(6);
+            if (sell > 0) b.add(GFORMAT.i(b.text(), sell));
+            else b.error("No active deal");
+            if (best > 0) {
+                b.NL();
+                b.textL("Best@avail"); b.tab(6); b.add(GFORMAT.i(b.text(), best));
+                if (best > sell) b.textL(" (better deal avail)");
+            }
+            CharSequence prob = SETT.TRADE().seller(res.tr()).problem();
+            if (prob != null) {
+                b.NL();
+                b.error(prob);
+            }
         }
 
         private GText statusFlag(int status) {

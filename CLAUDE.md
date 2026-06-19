@@ -66,6 +66,29 @@ All settlement economy data accessed via `settlement.main.SETT`:
 
 `Source` import: `settlement.room.industry.module.RoomProduction.Source`
 
+## FResources History API (per-RTYPE daily flows)
+
+`GAME.player().res()` → `FResources`. Use `.in(RTYPE)` / `.out(RTYPE)` to get inflow/outflow history by category:
+
+```java
+import game.faction.FResources.RTYPE;
+
+// Last completed day's value:
+long spoil  = GAME.player().res().out(RTYPE.SPOILAGE).history(res.tr()).get(1);
+long maint  = GAME.player().res().out(RTYPE.MAINTENANCE).history(res.tr()).get(1);
+long imp    = GAME.player().res().in(RTYPE.TRADE).history(res.tr()).get(1);
+long exp    = GAME.player().res().out(RTYPE.TRADE).history(res.tr()).get(1);
+long prod   = GAME.player().res().in(RTYPE.PRODUCED).history(res.tr()).get(1);
+long cons   = GAME.player().res().out(RTYPE.CONSUMED).history(res.tr()).get(1);
+// total() = net of all in/out (same as used by avg30dNet)
+```
+
+Guard with `hist.historyRecords() > 1` before calling `get(1)` to handle game start.
+
+**Full RTYPE enum**: `PRODUCED`, `CONSUMED`, `TRADE`, `TAX`, `CONSTRUCTION`, `FURNISH`, `EQUIPPED`, `MAINTENANCE`, `SPOILAGE`, `ARMY_SUPPLY`, `SPOILS`, `DIPLOMACY`, `THEFT`.
+
+`MAINTENANCE.estimateGlobal(res)` → real-time maintenance estimate (also accessible via RTYPE.MAINTENANCE history).
+
 ## Live-Updating Numeric Cells (GStat)
 
 `GStat` (`util.gui.misc.GStat`) is an abstract SPRITE/TITLEABLE that re-evaluates its text every frame:
@@ -177,6 +200,35 @@ Column header row uses `RENDEROBJ.RenderImp` (non-interactive) and renders `GTex
 | `GCOLOR` | `util.colors.GCOLOR` |
 | `COLOR` | `snake2d.util.color.COLOR` |
 
+## Trade Pricing APIs
+
+`FACTIONS.player().trade` → `PTrade` — tracks live market prices:
+
+| Field | Type | API |
+|---|---|---|
+| Best sell price (what NPCs pay) | `HistoryTradable` | `FACTIONS.player().trade.pricesSell.get(res.tr())` → `int` |
+| Market average price | `HistoryTradable` | `FACTIONS.player().trade.pricesAve.get(res.tr())` → `int` |
+| Best buy price (what NPCs sell at) | `HistoryTradable` | `FACTIONS.player().trade.pricesBuy.get(res.tr())` → `int` |
+
+`SETT.TRADE().seller(res.tr())` → `PSeller` — player's export settings for a resource:
+- `.priceCapsI.get()` — player's minimum sell price (price cap)
+- `.problem()` — why not exporting (`null` = exporting OK)
+- `.warning()` — non-blocking warnings
+
+**Best@avail** = scan reachable NPCs with `ff.res(res.tr()).priceBuyP()` and return the max. `priceBuyP()` = `priceAt(1) - totalFee(player, npc, distance, 1)` — trade-route pricing after toll, no manual-deal penalty. **Do NOT use `DealParty.manualPriceBuy()`** — it applies a 0.8× penalty for one-time deals, making Best@avail always lower than Sell@now (wrong). **Must guard with `ff.isActive() && RD.DIST().reachable(ff)`** — toll alone does not filter unreachable factions. Import: `game.faction.npc.FactionNPC`, `world.region.RD`.
+
+`PTrade.pricesSell` is populated using `priceBuyP()` over current trade partners — same method, but restricted to established partners. Best@avail scans all reachable NPCs, so it can exceed Sell@now when a better deal is available from a non-current partner.
+
+**Opportunity flag pattern**: `bestAvail > sellNow` → better deal available than current active price → color `GCOLOR.T().IGOOD`.
+
+**Click-through to game trade panel**: `VIEW.UI().goods.detail(res, GAME.player())` — opens `UIGoods` focused on the resource, closing the current panel.
+
+`HistoryTradable` extends `HistoryObject<TRADABLE>` — use `.get(TRADABLE)` for current value, `.history(TRADABLE).get(n)` for day-history (same pattern as `FResources`).
+
+**ResourceRow must extend `CLICKABLE.ClickableAbs`** (not `HoverableAbs`) to support click actions. Render signature: `render(r, ds, isActive, isSelected, isHovered)`. Set click action with `clickActionSet(() -> ...)`.
+
+`GBox.error()` does NOT exist. For error/warning text in hover tooltips, pre-create `GText` objects or use plain `textL()`.
+
 ## Milestone Status
 
 - [x] Milestone 1 — Build template, mod appears in launcher
@@ -185,8 +237,8 @@ Column header row uses `RENDEROBJ.RenderImp` (non-interactive) and renders `GTex
 - [x] Milestone 4 — Stored, Fill%, Prod/d, Cons/d, Net/d columns with live GStat cells
 - [x] Milestone 5 — Runway column + Status ⚑ flag (deficit / low runway / near-overflow / out-of-stock)
 - [x] Milestone 6 — Sort & filter (click-to-sort, negative-net/food-only filters, search box)
-- [ ] Milestone 7 — Loss/economic columns: Spoil/d, Maint/d, Import/Export/d, Δ7d trend
-- [ ] Milestone 8 — Trade-aware pricing: Sell@now, Best@avail, opportunity flag, hover + click-through
+- [x] Milestone 7 — Loss/economic columns: Spoil/d, Maint/d, Import/Export/d, Δ7d trend (Net/7d)
+- [x] Milestone 8 — Trade-aware pricing: Sell@now, Best@avail, opportunity flag, hover + click-through
 - [ ] Milestone 9 — Totals row: Σ Value, Σ Net gold/day, days-of-food
 - [ ] Milestone 10 — Polish: Net%, column show/hide, color-coding, click-through
 - [ ] Milestone 11 — Testing & stability
