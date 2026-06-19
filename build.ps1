@@ -9,8 +9,8 @@ param([string]$Goals = 'clean install')
 $ErrorActionPreference = 'Stop'
 
 # Toolchain locations (edit if you move/upgrade these)
-$env:JAVA_HOME = 'C:\Users\tgonzalez\AppData\Local\Programs\Eclipse Adoptium\jdk-21.0.11+10'
-$mavenBin      = 'C:\Projects\tools\apache-maven-3.9.6\bin'
+$env:JAVA_HOME = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot'
+$mavenBin      = 'C:\Projects\tools\apache-maven-3.9.16\bin'
 
 if (-not (Test-Path $env:JAVA_HOME)) { throw "JDK 21 not found at $env:JAVA_HOME" }
 if (-not (Test-Path $mavenBin))      { throw "Maven not found at $mavenBin" }

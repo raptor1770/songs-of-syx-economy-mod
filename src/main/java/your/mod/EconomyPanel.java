@@ -5,6 +5,9 @@ import game.faction.FACTIONS;
 import game.faction.FResources.RTYPE;
 import game.faction.diplomacy.DIP;
 import game.faction.npc.FactionNPC;
+import init.constant.C;
+import init.paths.PATH;
+import init.paths.PATHS;
 import init.resources.RESOURCE;
 import init.resources.RESOURCES;
 import init.sprite.UI.Icon;
@@ -14,6 +17,8 @@ import settlement.room.industry.module.RoomProduction.Source;
 import snake2d.MButt;
 import snake2d.SPRITE_RENDERER;
 import snake2d.util.color.COLOR;
+import snake2d.util.file.Json;
+import snake2d.util.file.JsonE;
 import snake2d.util.gui.GUI_BOX;
 import snake2d.util.gui.GuiSection;
 import snake2d.util.gui.clickable.CLICKABLE;
@@ -34,37 +39,73 @@ import world.region.RD;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public final class EconomyPanel extends IFullView {
 
     private enum SortCol { NAME, STORED, FILL, NET30, HIST_RW, PROJ_RW, STATUS, SPOIL, MAINT, IMPORT, EXPORT, DELTA7, SELL_NOW, BEST_AVAIL }
 
-    private static final int COL_ICON     = 0;
-    private static final int COL_NAME     = Icon.S + 8;
-    private static final int COL_STORED   = 210;
-    private static final int COL_FILL     = 285;
-    private static final int COL_NET30    = 340;
-    private static final int COL_HIST_RW  = 430;
-    private static final int COL_PROJ_RW  = 520;
-    private static final int COL_STATUS   = 610;
-    private static final int STATUS_COL_W = 80;
-    private static final int COL_SPOIL    = 700;
-    private static final int COL_MAINT    = 790;
-    private static final int COL_IMPORT   = 880;
-    private static final int COL_EXPORT   = 970;
-    private static final int COL_DELTA7   = 1060;
-    private static final int COL_SELL     = 1150;
-    private static final int COL_AVG      = 1235;
-    private static final int COL_W        = 85;
+    private static final int PAD   = 6;   // inner left/right padding
+    private static final int IND_W = 12;  // static reserved gutter for the ^/v sort indicator
+
+    /**
+     * Single source of truth for column geometry. {@code x} and {@code w} are
+     * measured/computed at construction in {@link #layoutColumns()} so columns
+     * always fit their label (+ indicator gutter) and widest sample value,
+     * regardless of font metrics.
+     */
+    private enum Col {
+        NAME   ("Resource",   SortCol.NAME,       null),       // width handled specially (icon + names)
+        STORED ("Stored",     SortCol.STORED,     "1.02K"),
+        FILL   ("Fill%",      SortCol.FILL,       "100%"),
+        NET30  ("Net/30d",    SortCol.NET30,      "+1.0K"),
+        HIST   ("Hist.Run",   SortCol.HIST_RW,    "999"),
+        PROJ   ("Proj.Run",   SortCol.PROJ_RW,    "999"),
+        STATUS ("Status",     SortCol.STATUS,     "NEAR FULL"),
+        SPOIL  ("Spoil/d",    SortCol.SPOIL,      "999"),
+        MAINT  ("Maint/d",    SortCol.MAINT,      "999"),
+        IMPORT ("Import/d",   SortCol.IMPORT,     "999"),
+        EXPORT ("Export/d",   SortCol.EXPORT,     "999"),
+        DELTA7 ("Net/7d",     SortCol.DELTA7,     "+1.0K"),
+        SELL   ("Sell@now",   SortCol.SELL_NOW,   "1.02K"),
+        AVG    ("Best@avail", SortCol.BEST_AVAIL, "1.02K");
+
+        final String  label;
+        final SortCol sort;
+        final String  sample;  // widest representative data value (null = name column)
+        int x;
+        int w;
+
+        Col(String label, SortCol sort, String sample) {
+            this.label = label; this.sort = sort; this.sample = sample;
+        }
+    }
+
+    /** Measure each column to fit label + indicator gutter and widest sample, then lay out x cumulatively. */
+    private void layoutColumns() {
+        for (Col c : Col.values()) {
+            if (c == Col.NAME) {
+                int longest = 0;
+                for (RESOURCE res : RESOURCES.ALL()) {
+                    longest = Math.max(longest, new GText(UI.FONT().S, res.name).width());
+                }
+                // icon + gap + longest name, plus the indicator gutter (Resource is sortable too)
+                c.w = Icon.S + 8 + longest + IND_W + 2 * PAD;
+            } else {
+                int labelW = new GText(UI.FONT().S, c.label).width();
+                int dataW  = c.sample == null ? 0 : new GText(UI.FONT().S, c.sample).width();
+                // header needs label + gutter; data needs its sample — take the wider, add padding
+                c.w = Math.max(labelW + IND_W, dataW) + 2 * PAD;
+            }
+        }
+        int cx = 0;
+        for (Col c : Col.values()) { c.x = cx; cx += c.w; }
+    }
+
     private static final int ROW_H        = Icon.S + 8;
     private static final int SEARCH_CHARS = 20;
-
-    private static final int[] COL_SEPS = {
-        COL_STORED, COL_FILL, COL_NET30, COL_HIST_RW, COL_PROJ_RW,
-        COL_STATUS, COL_SPOIL, COL_MAINT, COL_IMPORT, COL_EXPORT,
-        COL_DELTA7, COL_SELL, COL_AVG
-    };
 
     private static final int    STATUS_OK      = 0;
     private static final int    STATUS_FULL    = 1;
@@ -75,23 +116,40 @@ public final class EconomyPanel extends IFullView {
     private static final int    LOW_RUNWAY_DAYS = 7;
     private static final double OVERFLOW_FILL   = 0.9;
     private static final int    NET30_DAYS      = 30;
+    private static final long   RUNWAY_CAP      = 999;  // runway day-counts above this show "999+"
+    private static final double WINSOR_FRACTION = 0.10; // fraction of days clamped at each end for Hist.Run
 
-    private SortCol sortCol       = SortCol.NAME;
-    private boolean sortAsc       = true;
+    /** Resource column cycles through three distinct orderings. */
+    private enum NameSort { CATEGORY, ASC, DESC }
+
+    private SortCol  sortCol       = SortCol.NAME;
+    private boolean  sortAsc       = true;
+    private NameSort nameSort      = NameSort.CATEGORY;
     private boolean filterDeficit = false;
     private boolean filterFood    = false;
     private StringInputSprite searchSprite;
+
+    /** Settings file (under %APPDATA%\songsofsyx\settings) persisting hide choices across restarts. */
+    private static final String CONFIG_FILE = "EconomyOverview";
+
+    private final Set<RESOURCE> hiddenPins = new HashSet<>(); // force-hidden resources
+    private final Set<RESOURCE> shownPins  = new HashSet<>(); // force-shown (overrides auto-hide)
+    private boolean autoHide   = false;
+    private boolean showHidden = false;                       // view toggle, not persisted
 
     private ResourceRow[]  resourceRows;
     private RENDEROBJ[]    rowsArray;
     private RENDEROBJ[]    defaultOrder;
 
     private FilterableScroll scroll;
+    private RENDEROBJ        manualPage;
 
     public EconomyPanel() {
         super("Economy Overview", UI.icons().l.crate);
         section.body().setWidth(WIDTH).setHeight(0);
 
+        loadConfig();
+        layoutColumns();
         buildAllRows();
 
         GuiSection filterBar = buildFilterBar();
@@ -152,18 +210,183 @@ public final class EconomyPanel extends IFullView {
             if (scroll != null) scroll.init();
         });
 
+        GButt.Checkbox autoHideBtn = new GButt.Checkbox("Auto-hide");
+        autoHideBtn.selectedSet(autoHide);
+        autoHideBtn.hoverInfoSet("Hide resources you neither produce nor have in storage");
+        autoHideBtn.clickActionSet(() -> {
+            autoHide = !autoHide;
+            autoHideBtn.selectedSet(autoHide);
+            saveConfig();
+            if (scroll != null) scroll.init();
+        });
+
+        GButt.Checkbox showHiddenBtn = new GButt.Checkbox("Show hidden");
+        showHiddenBtn.selectedSet(showHidden);
+        showHiddenBtn.hoverInfoSet("Reveal hidden rows (dimmed) so you can restore them");
+        showHiddenBtn.clickActionSet(() -> {
+            showHidden = !showHidden;
+            showHiddenBtn.selectedSet(showHidden);
+            if (scroll != null) scroll.init();
+        });
+
+        manualPage = buildManualPage();
+        GButt.Panel manualBtn = new GButt.Panel("Manual");
+        manualBtn.hoverInfoSet("Field guide: what each column means and how it is calculated");
+        manualBtn.clickActionSet(() -> VIEW.inters().popup.show(manualPage, manualBtn));
+
         GuiSection bar = new GuiSection();
         bar.add(searchInput, 0, 0);
         bar.addRight(8, deficitBtn);
         bar.addRight(8, foodBtn);
+        bar.addRight(8, autoHideBtn);
+        bar.addRight(8, showHiddenBtn);
+        bar.addRight(8, manualBtn);
         return bar;
+    }
+
+    // ── Manual / field guide ─────────────────────────────────────────────────
+
+    /** Build the scrollable "field guide" shown by the Manual button. */
+    private RENDEROBJ buildManualPage() {
+        final int W = 600;
+        List<RENDEROBJ> rows = new ArrayList<>();
+
+        rows.add(manualHeader(W, "Economy Overview - Field Guide"));
+        rows.add(manualPara(W,
+            "All values are read live from the game's own economy data (SETT.ROOMS and "
+            + "the faction resource tally) - the same numbers the vanilla Goods screen "
+            + "uses. \"/d\" means per day; daily figures are the last completed day unless "
+            + "noted otherwise."));
+
+        rows.add(manualEntry(W, "Stored",
+            "Units currently held in stockpiles. Click the cell to open the goods/storage "
+            + "view for that resource."));
+        rows.add(manualEntry(W, "Fill%",
+            "Stored divided by total storage capacity. Blank when there is no capacity for "
+            + "the good."));
+        rows.add(manualEntry(W, "Net/30d",
+            "Average true net change per day over the last 30 days, across every flow type "
+            + "(production, citizens eating, trade, construction, maintenance, spoilage, tax "
+            + "and so on). Green is a surplus, red is a deficit."));
+
+        rows.add(manualEntry(W, "Hist.Run  (Historical Runway)",
+            "Days until the stockpile empties at the recent trend. It divides Stored by a "
+            + "robust 30-day average net: the most extreme " + (int) (WINSOR_FRACTION * 100)
+            + "% of days at each end are clamped before averaging, so a single huge day (a war, "
+            + "a finished building, a big caravan) cannot dominate, while recurring flows like "
+            + "regular trade are still counted. This can differ from the raw Net/30d column, "
+            + "which is a plain average. \"+\" means no net loss. Capped at " + RUNWAY_CAP + "+."));
+        rows.add(manualEntry(W, "Proj.Run  (Projected Runway)",
+            "Days until empty at your current structural rate: Stored / projected net per day. "
+            + "The projection sums the game's live production and consumption estimates "
+            + "(industry, citizens eating, maintenance, spoilage, equipment wear, army supply, "
+            + "housing, temples and tax) and folds in trade and construction from the last "
+            + "completed day. It reacts immediately when you change your production setup, "
+            + "whereas Hist.Run lags. \"+\" means no net loss. Capped at " + RUNWAY_CAP + "+."));
+        rows.add(manualEntry(W, "Reading the two runways together",
+            "Proj healthy but Hist falling = a recent one-off event drained you (a big trade "
+            + "or construction project). Proj falling but Hist still healthy = a change you "
+            + "just made will bite soon. They differ mainly because Hist averages 30 days of "
+            + "actuals while Proj is a current-rate estimate."));
+
+        rows.add(manualEntry(W, "Status",
+            "Flag derived from stored level and the same robust 30-day net as Hist.Run: "
+            + "OUT = empty; LOW = in deficit "
+            + "with under " + LOW_RUNWAY_DAYS + " days left; DEFICIT = shrinking; NEAR FULL = at "
+            + "or above " + (int) (OVERFLOW_FILL * 100) + "% of capacity."));
+        rows.add(manualEntry(W, "Spoil/d  /  Maint/d",
+            "Goods lost to spoilage, and goods consumed by building maintenance, on the last "
+            + "completed day."));
+        rows.add(manualEntry(W, "Import/d  /  Export/d",
+            "Units bought in and sold out via trade on the last completed day."));
+        rows.add(manualEntry(W, "Net/7d",
+            "Like Net/30d but averaged over the last 7 days - a shorter, more responsive "
+            + "trend."));
+        rows.add(manualEntry(W, "Sell@now",
+            "Best price an active trade partner currently pays for the good. Click to open "
+            + "that trade deal."));
+        rows.add(manualEntry(W, "Best@avail",
+            "Best price any reachable faction would pay, including factions you do not yet "
+            + "trade with. Shown green when it beats Sell@now - a better deal is available. "
+            + "Click to open it."));
+        rows.add(manualEntry(W, "Totals row",
+            "Sum Net/d = sum of (30-day net x sell price) over visible rows; Sum Value = "
+            + "stored x sell price; Food = total stored food / total daily food eaten. "
+            + "Hidden rows are excluded from the totals."));
+
+        rows.add(manualEntry(W, "Hiding rows  (the x)",
+            "Hover a row and click the small \"x\" at the right of the Resource name to hide "
+            + "it. Hidden rows drop out of the list and the totals. Your choices are saved "
+            + "and restored the next time you play."));
+        rows.add(manualEntry(W, "Auto-hide",
+            "Hides every resource you currently produce none of and have none of in storage "
+            + "- the goods that don't matter for this settlement. Anything you make or hold "
+            + "stays. Resources reappear automatically once you start producing or storing "
+            + "them again."));
+        rows.add(manualEntry(W, "Show hidden",
+            "Reveals all hidden rows (shown dimmed) so you can review them. Click the \"+\" "
+            + "marker on a dimmed row to bring it back. Restoring an auto-hidden resource "
+            + "pins it visible even while Auto-hide is on."));
+
+        rows.add(manualPara(W, "Right-click, or the X in the corner, closes this guide."));
+
+        int totalH = 0;
+        for (RENDEROBJ rr : rows) totalH += rr.body().height();
+        int h = Math.min(totalH + 4, (C.HEIGHT() * 2) / 3);
+        return new GScrollRows(rows.toArray(new RENDEROBJ[0]), h, W).view();
+    }
+
+    private static RENDEROBJ manualHeader(int width, String text) {
+        GText t = new GText(UI.FONT().H2, text).lablify();
+        t.setMaxWidth(width - 12);
+        final int th = t.height();
+        return new RENDEROBJ.RenderImp(width, th + 12) {
+            @Override public void render(SPRITE_RENDERER r, float ds) {
+                int x = body.x1() + 6;
+                int y = body.y1() + 6;
+                t.render(r, x, x + width - 12, y, y + th);
+            }
+        };
+    }
+
+    private static RENDEROBJ manualPara(int width, String text) {
+        GText t = new GText(UI.FONT().S, text).normalify();
+        t.setMaxWidth(width - 12);
+        t.setMultipleLines(true);
+        final int th = t.height();
+        return new RENDEROBJ.RenderImp(width, th + 8) {
+            @Override public void render(SPRITE_RENDERER r, float ds) {
+                int x = body.x1() + 6;
+                int y = body.y1() + 4;
+                t.render(r, x, x + width - 12, y, y + th);
+            }
+        };
+    }
+
+    private static RENDEROBJ manualEntry(int width, String head, String desc) {
+        GText h = new GText(UI.FONT().S, head).lablify();
+        h.setMaxWidth(width - 12);
+        GText b = new GText(UI.FONT().S, desc).normalify();
+        b.setMaxWidth(width - 12);
+        b.setMultipleLines(true);
+        final int hh = h.height();
+        final int bh = b.height();
+        return new RENDEROBJ.RenderImp(width, hh + 2 + bh + 10) {
+            @Override public void render(SPRITE_RENDERER r, float ds) {
+                int x = body.x1() + 6;
+                int y = body.y1() + 4;
+                h.render(r, x, x + width - 12, y, y + hh);
+                b.render(r, x, x + width - 12, y + hh + 2, y + hh + 2 + bh);
+            }
+        };
     }
 
     // ── Sortable header row ──────────────────────────────────────────────────
 
     private static void drawColLines(SPRITE_RENDERER r, int x, int y1, int y2) {
-        for (int cx : COL_SEPS) {
-            COLOR.WHITE35.render(r, x + cx - 4, x + cx - 3, y1, y2);
+        for (Col c : Col.values()) {
+            if (c == Col.NAME) continue; // no separator before the first column
+            COLOR.WHITE35.render(r, x + c.x - 1, x + c.x, y1, y2);
         }
     }
 
@@ -172,62 +395,85 @@ public final class EconomyPanel extends IFullView {
             @Override public void render(SPRITE_RENDERER r, float ds) {
                 drawColLines(r, body().x1(), body().y1(), body().y2());
                 super.render(r, ds);
+                // Full-width bottom border separating header from data rows
+                COLOR.WHITE35.render(r, body().x1(), body().x1() + WIDTH, body().y2() - 1, body().y2());
             }
         };
         row.body().setWidth(WIDTH).setHeight(ROW_H);
-        addSortCol(row, "Resource",  SortCol.NAME,    COL_NAME,    COL_STORED - COL_NAME - 4);
-        addSortCol(row, "Stored",    SortCol.STORED,  COL_STORED,  COL_W);
-        addSortCol(row, "Fill%",     SortCol.FILL,    COL_FILL,    COL_W);
-        addSortCol(row, "Net/30d",   SortCol.NET30,   COL_NET30,   COL_W);
-        addSortCol(row, "Hist.Run",  SortCol.HIST_RW, COL_HIST_RW, COL_W);
-        addSortCol(row, "Proj.Run",  SortCol.PROJ_RW, COL_PROJ_RW, COL_W);
-        addSortCol(row, "Status",    SortCol.STATUS,  COL_STATUS,  STATUS_COL_W);
-        addSortCol(row, "Spoil/d",   SortCol.SPOIL,    COL_SPOIL,   COL_W);
-        addSortCol(row, "Maint/d",   SortCol.MAINT,    COL_MAINT,   COL_W);
-        addSortCol(row, "Import/d",  SortCol.IMPORT,   COL_IMPORT,  COL_W);
-        addSortCol(row, "Export/d",  SortCol.EXPORT,   COL_EXPORT,  COL_W);
-        addSortCol(row, "Net/7d",    SortCol.DELTA7,   COL_DELTA7,  COL_W);
-        addSortCol(row, "Sell@now",   SortCol.SELL_NOW,   COL_SELL, COL_W);
-        addSortCol(row, "Best@avail", SortCol.BEST_AVAIL, COL_AVG,  COL_W);
+        for (Col c : Col.values()) addSortCol(row, c);
         return row;
     }
 
-    private void addSortCol(GuiSection row, String label, SortCol col, int x, int w) {
-        GText normal  = new GText(UI.FONT().S, label).lablify();
-        GText asc     = new GText(UI.FONT().S, label + " ▲").lablify();
-        GText desc    = new GText(UI.FONT().S, label + " ▼").lablify();
-        GText normalH = new GText(UI.FONT().S, label).clickify();
-        GText ascH    = new GText(UI.FONT().S, label + " ▲").clickify();
-        GText descH   = new GText(UI.FONT().S, label + " ▼").clickify();
+    private void addSortCol(GuiSection row, Col c) {
+        GText normal  = new GText(UI.FONT().S, c.label).lablify();
+        GText normalH = new GText(UI.FONT().S, c.label).clickify();
+        GText ascInd  = new GText(UI.FONT().S, "^").lablify();
+        GText ascIndH = new GText(UI.FONT().S, "^").clickify();
+        GText desInd  = new GText(UI.FONT().S, "v").lablify();
+        GText desIndH = new GText(UI.FONT().S, "v").clickify();
 
-        CLICKABLE cell = new CLICKABLE.ClickableAbs(w, ROW_H) {
+        CLICKABLE cell = new CLICKABLE.ClickableAbs(c.w, ROW_H) {
             @Override
-            protected void render(SPRITE_RENDERER r, float ds, boolean isHov, boolean isSel, boolean isAct) {
-                boolean active = (sortCol == col);
-                GText txt;
-                if (active && sortAsc)  txt = isHov ? ascH  : asc;
-                else if (active)        txt = isHov ? descH : desc;
-                else                    txt = isHov ? normalH : normal;
-                txt.render(r, body.x1(), body.y1());
+            protected void render(SPRITE_RENDERER r, float ds, boolean isActive, boolean isSel, boolean isHovered) {
+                boolean sorted;
+                GText ind;  // null = no arrow (Resource in category mode, or not the active column)
+                if (c.sort == SortCol.NAME) {
+                    boolean active = (sortCol == SortCol.NAME);
+                    // category is the natural default order → shown without highlight or arrow
+                    sorted = active && nameSort != NameSort.CATEGORY;
+                    if (active && nameSort == NameSort.ASC)       ind = isHovered ? ascIndH : ascInd;
+                    else if (active && nameSort == NameSort.DESC) ind = isHovered ? desIndH : desInd;
+                    else                                          ind = null;
+                } else {
+                    sorted = (sortCol == c.sort);
+                    ind = sorted ? (sortAsc ? (isHovered ? ascIndH : ascInd) : (isHovered ? desIndH : desInd)) : null;
+                }
+                GButt.ButtPanel.renderBG(r, isActive, sorted, isHovered, body);
+
+                int yText = body.y1() + (ROW_H - normal.height()) / 2;
+                // Label fixed at left edge — IND_W gutter on the right is always reserved,
+                // so the label never shifts and the indicator never overlaps it.
+                (isHovered ? normalH : normal).render(r, body.x1() + PAD, yText);
+                if (ind != null) {
+                    ind.render(r, body.x1() + c.w - IND_W + (IND_W - ind.width()) / 2, yText);
+                }
             }
         };
-        cell.clickActionSet(() -> onSortChange(col));
-        cell.hoverInfoSet("Sort by " + label);
-        row.add(cell, x, 0);
+        cell.clickActionSet(() -> onSortChange(c.sort));
+        cell.hoverInfoSet(c.sort == SortCol.NAME
+            ? "Sort: by category / A→Z / Z→A (click to cycle)"
+            : "Sort by " + c.label);
+        row.add(cell, c.x, 0);
     }
 
     // ── Sort logic ───────────────────────────────────────────────────────────
 
     private void onSortChange(SortCol col) {
-        if (sortCol == col) sortAsc = !sortAsc;
-        else { sortCol = col; sortAsc = true; }
+        if (col == SortCol.NAME) {
+            // Resource cycles: by category (default) → A→Z → Z→A → by category …
+            nameSort = nextNameSort(nameSort);
+            sortCol  = SortCol.NAME;
+        } else if (sortCol == col) {
+            sortAsc = !sortAsc;
+        } else {
+            sortCol = col;
+            sortAsc = true;
+        }
         applySortToArray();
         scroll.target.set(0);
         scroll.init();
     }
 
+    private static NameSort nextNameSort(NameSort n) {
+        switch (n) {
+            case CATEGORY: return NameSort.ASC;
+            case ASC:      return NameSort.DESC;
+            default:       return NameSort.CATEGORY;
+        }
+    }
+
     private void applySortToArray() {
-        if (sortCol == SortCol.NAME && sortAsc) {
+        if (sortCol == SortCol.NAME && nameSort == NameSort.CATEGORY) {
             System.arraycopy(defaultOrder, 0, rowsArray, 0, rowsArray.length);
             return;
         }
@@ -287,43 +533,107 @@ public final class EconomyPanel extends IFullView {
             case BEST_AVAIL:
                 cmp = Comparator.comparingInt(rr -> bestAvail(rr.res));
                 break;
-            default: // NAME descending
+            default: // NAME — uses nameSort, not sortAsc
                 cmp = Comparator.comparing(rr -> rr.res.name.toString());
-                break;
+                return nameSort == NameSort.DESC ? cmp.reversed() : cmp;
         }
         return sortAsc ? cmp : cmp.reversed();
     }
 
     // ── Economy data helpers ─────────────────────────────────────────────────
 
-    private static long avg30dNet(RESOURCE res) {
+    /**
+     * Average true net change per day over the last 30 completed days, kept as a
+     * {@code double} so sub-unit daily drains are not silently floored to zero
+     * (which would otherwise read as an infinite runway). Uses {@code total()},
+     * which is the net of every flow type — production, eating, trade,
+     * construction, maintenance, spoilage, tax, etc.
+     */
+    private static double avg30dNetD(RESOURCE res) {
         var hist = GAME.player().res().total().history(res.tr());
         int days = Math.min(NET30_DAYS, hist.historyRecords() - 1);
         if (days <= 0) return 0;
         long total = 0;
         for (int i = 1; i <= days; i++) total += hist.get(i);
-        return total / days;
+        return (double) total / days;
     }
 
-    private static long projNet(RESOURCE res) {
-        long net = 0;
-        for (Source s : SETT.ROOMS().PROD.producers(res)) net += (long) s.am();
-        for (Source s : SETT.ROOMS().PROD.consumers(res)) net -= (long) s.am();
+    /** Rounded integer form of {@link #avg30dNetD} for display/sorting columns. */
+    private static long avg30dNet(RESOURCE res) {
+        return Math.round(avg30dNetD(res));
+    }
+
+    /**
+     * Forward-looking net/day estimate. Sums the game's live production and
+     * consumption sources (industry, citizens eating, maintenance, spoilage,
+     * equipment, army supply, housing, temples, tax) as {@code double}s — casting
+     * only once, so fractional flows are not lost — then folds in trade and
+     * construction, which are not represented as PROD sources, using the last
+     * completed day's actuals.
+     */
+    private static double projNetD(RESOURCE res) {
+        double net = 0;
+        for (Source s : SETT.ROOMS().PROD.producers(res)) net += s.am();
+        for (Source s : SETT.ROOMS().PROD.consumers(res)) net -= s.am();
+        net += lastDayIn(RTYPE.TRADE, res)        - lastDayOut(RTYPE.TRADE, res);
+        net += lastDayIn(RTYPE.CONSTRUCTION, res) - lastDayOut(RTYPE.CONSTRUCTION, res);
         return net;
     }
 
+    /**
+     * Robust average daily net over the last {@link #NET30_DAYS} days, used for the
+     * historical runway and Status flag. The most extreme {@link #WINSOR_FRACTION} of
+     * days at each end are winsorized (clamped to the 10th/90th percentile) before
+     * averaging, so a single large one-off day (a war, a finished building, a big
+     * caravan) cannot dominate the estimate — while recurring bursty flows like
+     * regular trade are still counted. With fewer than 10 days of history this is
+     * identical to the plain mean ({@link #avg30dNetD}).
+     */
+    private static double histNetRobust(RESOURCE res) {
+        var hist = GAME.player().res().total().history(res.tr());
+        int days = Math.min(NET30_DAYS, hist.historyRecords() - 1);
+        if (days <= 0) return 0;
+        double[] v = new double[days];
+        for (int i = 0; i < days; i++) v[i] = hist.get(i + 1);
+        Arrays.sort(v);
+        int k = (int) (days * WINSOR_FRACTION);
+        if (k > 0) {
+            double lo = v[k];
+            double hi = v[days - 1 - k];
+            for (int i = 0; i < k; i++) { v[i] = lo; v[days - 1 - i] = hi; }
+        }
+        double total = 0;
+        for (double d : v) total += d;
+        return total / days;
+    }
+
     private static double histRunway(RESOURCE res) {
-        long net = avg30dNet(res);
+        double net = histNetRobust(res);
         if (net >= 0) return Double.MAX_VALUE;
         double stored = SETT.ROOMS().STOCKPILE.tally().amountTotal(res);
         return stored <= 0 ? 0 : stored / -net;
     }
 
     private static double projRunway(RESOURCE res) {
-        long net = projNet(res);
+        double net = projNetD(res);
         if (net >= 0) return Double.MAX_VALUE;
         double stored = SETT.ROOMS().STOCKPILE.tally().amountTotal(res);
         return stored <= 0 ? 0 : stored / -net;
+    }
+
+    /** Render a runway day-count into a cell, capping the display at {@link #RUNWAY_CAP}. */
+    private static void renderRunway(GText text, double net, RESOURCE res) {
+        if (net >= 0) { text.add("+"); text.color(GCOLOR.T().IGOOD); return; }
+        text.normalify();
+        double stored = SETT.ROOMS().STOCKPILE.tally().amountTotal(res);
+        if (stored <= 0) { GFORMAT.i(text, 0L); return; }
+        long days = (long) (stored / -net);
+        if (days > RUNWAY_CAP) {
+            GFORMAT.i(text, RUNWAY_CAP);
+            text.add("+");
+        } else {
+            GFORMAT.i(text, days);
+        }
     }
 
     private static long lastDayIn(RTYPE type, RESOURCE res) {
@@ -384,9 +694,9 @@ public final class EconomyPanel extends IFullView {
         if (stored <= 0) return STATUS_EMPTY;
         double space = SETT.ROOMS().STOCKPILE.tally().space.total(res);
         if (space > 0 && stored / space >= OVERFLOW_FILL) return STATUS_FULL;
-        long net = avg30dNet(res);
+        double net = histNetRobust(res);
         if (net < 0) {
-            long runway = (long) (stored / -net);
+            double runway = stored / -net;
             return runway < LOW_RUNWAY_DAYS ? STATUS_LOW : STATUS_DEFICIT;
         }
         return STATUS_OK;
@@ -395,13 +705,83 @@ public final class EconomyPanel extends IFullView {
     // ── Filter helper (mirrors FilterableScroll.passesFilter for resource rows) ──
 
     private boolean isVisible(RESOURCE res) {
-        if (filterDeficit && avg30dNet(res) >= 0) return false;
+        if (isHidden(res) && !showHidden) return false;
+        if (filterDeficit && avg30dNetD(res) >= 0) return false;
         if (filterFood && !RESOURCES.EDI().is(res)) return false;
         if (searchSprite != null && searchSprite.text().length() > 0) {
             String q = searchSprite.text().toString().toLowerCase();
             if (!res.name.toString().toLowerCase().startsWith(q)) return false;
         }
         return true;
+    }
+
+    // ── Hide / auto-hide ─────────────────────────────────────────────────────
+
+    /** A resource qualifies for auto-hide when nothing is produced and none is stored. */
+    private static boolean autoQualifiesHide(RESOURCE res) {
+        return producedNow(res) == 0
+                && SETT.ROOMS().STOCKPILE.tally().amountTotal(res) <= 0;
+    }
+
+    private static double producedNow(RESOURCE res) {
+        double p = 0;
+        for (Source s : SETT.ROOMS().PROD.producers(res)) p += s.am();
+        return p;
+    }
+
+    private boolean isHidden(RESOURCE res) {
+        if (hiddenPins.contains(res)) return true;
+        if (shownPins.contains(res))  return false;
+        return autoHide && autoQualifiesHide(res);
+    }
+
+    /** Flip the row's current visibility — driven by the per-row hide/restore marker. */
+    private void toggleHidden(RESOURCE res) {
+        boolean hiddenNow = isHidden(res);
+        hiddenPins.remove(res);
+        shownPins.remove(res);
+        if (hiddenNow) {                                    // make it visible
+            if (autoHide && autoQualifiesHide(res)) shownPins.add(res);
+        } else {                                            // hide it
+            hiddenPins.add(res);
+        }
+        saveConfig();
+        if (scroll != null) scroll.init();
+    }
+
+    // ── Persistence (global settings file, survives restart) ─────────────────
+
+    private void loadConfig() {
+        try {
+            PATH dir = PATHS.local().SETTINGS;
+            if (!dir.exists(CONFIG_FILE)) return;
+            Json j = new Json(dir.gets(CONFIG_FILE));
+            autoHide = j.i("AUTO_HIDE", 0, 1, 0) != 0;
+            resolveKeys(j, "HIDDEN", hiddenPins);
+            resolveKeys(j, "SHOWN",  shownPins);
+        } catch (Exception e) {
+            // missing or corrupt config — start with defaults
+        }
+    }
+
+    private static void resolveKeys(Json j, String field, Set<RESOURCE> into) {
+        if (!j.has(field)) return;
+        Set<String> keys = new HashSet<>(Arrays.asList(j.values(field)));
+        for (RESOURCE res : RESOURCES.ALL()) {
+            if (keys.contains(res.key)) into.add(res);
+        }
+    }
+
+    private void saveConfig() {
+        try {
+            JsonE j = new JsonE();
+            j.add("AUTO_HIDE", autoHide ? 1 : 0);
+            j.add("HIDDEN", hiddenPins.stream().map(r -> r.key).toArray(String[]::new));
+            j.add("SHOWN",  shownPins.stream().map(r -> r.key).toArray(String[]::new));
+            j.save(PATHS.local().SETTINGS.get(CONFIG_FILE));
+        } catch (Exception e) {
+            // non-fatal: hide choices simply won't persist this session
+        }
     }
 
     private static RENDEROBJ separatorRow() {
@@ -464,11 +844,11 @@ public final class EconomyPanel extends IFullView {
         };
 
         final int LBL_GAP   = 4;
-        final int STAT_W    = COL_W + 20;
+        final int STAT_W    = Col.NET30.w + 20;
         // Positions for the three aggregate groups (left edge of label)
-        final int X_NET     = COL_NET30;
-        final int X_VALUE   = COL_SELL;
-        final int X_FOOD    = COL_AVG + COL_W + 8;
+        final int X_NET     = Col.NET30.x;
+        final int X_VALUE   = Col.SELL.x;
+        final int X_FOOD    = Col.AVG.x + Col.AVG.w + 8;
 
         return new RENDEROBJ.RenderImp(WIDTH, ROW_H) {
             @Override public void render(SPRITE_RENDERER r, float ds) {
@@ -480,7 +860,7 @@ public final class EconomyPanel extends IFullView {
                 GCOLOR.UI().NORMAL.normal.render(r, x, x + WIDTH, y1, y2);
                 COLOR.WHITE35.render(r, x, x + WIDTH, y1, y1 + 1);
 
-                totalsLabel.render(r, x + COL_NAME, yT);
+                totalsLabel.render(r, x + Col.NAME.x + Icon.S + 8, yT);
 
                 netGoldLabel.render(r, x + X_NET, yT);
                 netGoldStat.render(r,
@@ -524,6 +904,9 @@ public final class EconomyPanel extends IFullView {
         private final GStat delta7Stat;
         private final GStat sellStat;
         private final GStat avgStat;
+        private final GText hideMark    = new GText(UI.FONT().S, "x").normalify();
+        private final GText hideMarkH   = new GText(UI.FONT().S, "x").clickify();
+        private final GText restoreMark = new GText(UI.FONT().S, "+").clickify();
         private boolean leftWasDown = false;
 
         ResourceRow(RESOURCE res) {
@@ -551,20 +934,12 @@ public final class EconomyPanel extends IFullView {
             };
             histRunwayStat = new GStat() {
                 @Override public void update(GText text) {
-                    long net = avg30dNet(res);
-                    if (net >= 0) { text.add("+"); text.color(GCOLOR.T().IGOOD); return; }
-                    text.normalify();
-                    double stored = SETT.ROOMS().STOCKPILE.tally().amountTotal(res);
-                    GFORMAT.i(text, stored <= 0 ? 0L : (long) (stored / -net));
+                    renderRunway(text, histNetRobust(res), res);
                 }
             };
             projRunwayStat = new GStat() {
                 @Override public void update(GText text) {
-                    long net = projNet(res);
-                    if (net >= 0) { text.add("+"); text.color(GCOLOR.T().IGOOD); return; }
-                    text.normalify();
-                    double stored = SETT.ROOMS().STOCKPILE.tally().amountTotal(res);
-                    GFORMAT.i(text, stored <= 0 ? 0L : (long) (stored / -net));
+                    renderRunway(text, projNetD(res), res);
                 }
             };
             statusEmptyText   = new GText(UI.FONT().S, "OUT").errorify();
@@ -625,12 +1000,23 @@ public final class EconomyPanel extends IFullView {
             boolean leftDown = MButt.LEFT.isDown();
             if (isHovered && leftDown && !leftWasDown) {
                 int relX = VIEW.mouse().x() - body.x1();
-                if (relX >= COL_SELL && relX < COL_SELL + COL_W) {
+                if (inMarker(relX)) {
+                    toggleHidden(res);
+                } else if (inCol(relX, Col.SELL)) {
                     FactionNPC npc = sellNowNpc(res);
-                    if (npc != null) VIEW.world().UI.factions.openSell(npc, res.tr());
-                } else if (relX >= COL_AVG && relX < COL_AVG + COL_W) {
+                    if (npc != null) {
+                        VIEW.UI().manager.close();
+                        VIEW.world().UI.factions.openSell(npc, res.tr());
+                    }
+                } else if (inCol(relX, Col.AVG)) {
                     FactionNPC npc = bestAvailNpc(res);
-                    if (npc != null) VIEW.world().UI.factions.openSell(npc, res.tr());
+                    if (npc != null) {
+                        VIEW.UI().manager.close();
+                        VIEW.world().UI.factions.openSell(npc, res.tr());
+                    }
+                } else if (inCol(relX, Col.STORED) || inCol(relX, Col.FILL)) {
+                    // Open the goods/storage overview for this resource
+                    VIEW.UI().goods.detail(res, GAME.player());
                 }
             }
             leftWasDown = leftDown;
@@ -640,36 +1026,69 @@ public final class EconomyPanel extends IFullView {
             int y2    = body.y2();
             int yText = y1 + (ROW_H - nameText.height()) / 2;
 
+            // Hidden rows revealed via "Show hidden" render over a muted band.
+            boolean dimmed = showHidden && isHidden(res);
+            if (dimmed) COLOR.WHITE25.render(r, x, x + WIDTH, y1, y2 - 1);
+
             COLOR.WHITE35.render(r, x, x + WIDTH, y2 - 1, y2);
             drawColLines(r, x, y1, y2);
 
             if (isHovered) {
                 int relX = VIEW.mouse().x() - x;
-                if (relX >= COL_SELL && relX < COL_SELL + COL_W) {
-                    GCOLOR.UI().GOOD.hovered.render(r, x + COL_SELL - 2, x + COL_SELL + COL_W, y1, y2 - 1);
-                } else if (relX >= COL_AVG && relX < COL_AVG + COL_W) {
-                    GCOLOR.UI().GOOD.hovered.render(r, x + COL_AVG - 2, x + COL_AVG + COL_W, y1, y2 - 1);
+                if (inCol(relX, Col.SELL)) {
+                    GCOLOR.UI().GOOD.hovered.render(r, x + Col.SELL.x, x + Col.SELL.x + Col.SELL.w, y1, y2 - 1);
+                } else if (inCol(relX, Col.AVG)) {
+                    GCOLOR.UI().GOOD.hovered.render(r, x + Col.AVG.x, x + Col.AVG.x + Col.AVG.w, y1, y2 - 1);
+                } else if (inCol(relX, Col.STORED)) {
+                    GCOLOR.UI().NEUTRAL.hovered.render(r, x + Col.STORED.x, x + Col.STORED.x + Col.STORED.w, y1, y2 - 1);
+                } else if (inCol(relX, Col.FILL)) {
+                    GCOLOR.UI().NEUTRAL.hovered.render(r, x + Col.FILL.x, x + Col.FILL.x + Col.FILL.w, y1, y2 - 1);
                 }
             }
 
-            res.icon().small.render(r, x + COL_ICON, y1 + (ROW_H - Icon.S) / 2);
-            nameText.render(r,       x + COL_NAME,    yText);
-            storedStat.render(r,     x + COL_STORED,  x + COL_STORED  + COL_W, y1, y2);
-            fillStat.render(r,       x + COL_FILL,    x + COL_FILL    + COL_W, y1, y2);
-            net30dStat.render(r,     x + COL_NET30,   x + COL_NET30   + COL_W, y1, y2);
-            histRunwayStat.render(r, x + COL_HIST_RW, x + COL_HIST_RW + COL_W, y1, y2);
-            projRunwayStat.render(r, x + COL_PROJ_RW, x + COL_PROJ_RW + COL_W, y1, y2);
+            res.icon().small.render(r, x + Col.NAME.x, y1 + (ROW_H - Icon.S) / 2);
+            nameText.render(r,       x + Col.NAME.x + Icon.S + 8, yText);
+
+            // Hide / restore marker in the NAME column's reserved right gutter.
+            int gutter = x + Col.NAME.x + Col.NAME.w - IND_W;
+            if (dimmed) {
+                restoreMark.render(r, gutter + (IND_W - restoreMark.width()) / 2, yText);
+            } else if (isHovered) {
+                GText m = inMarker(VIEW.mouse().x() - x) ? hideMarkH : hideMark;
+                m.render(r, gutter + (IND_W - m.width()) / 2, yText);
+            }
+
+            stat(storedStat,     x, Col.STORED, y1, y2, r);
+            stat(fillStat,       x, Col.FILL,   y1, y2, r);
+            stat(net30dStat,     x, Col.NET30,  y1, y2, r);
+            stat(histRunwayStat, x, Col.HIST,   y1, y2, r);
+            stat(projRunwayStat, x, Col.PROJ,   y1, y2, r);
 
             GText flag = statusFlag(computeStatus(res));
-            if (flag != null) flag.render(r, x + COL_STATUS, yText);
+            if (flag != null) flag.render(r, x + Col.STATUS.x + PAD, yText);
 
-            spoilStat.render(r,  x + COL_SPOIL,  x + COL_SPOIL  + COL_W, y1, y2);
-            maintStat.render(r,  x + COL_MAINT,  x + COL_MAINT  + COL_W, y1, y2);
-            importStat.render(r, x + COL_IMPORT, x + COL_IMPORT + COL_W, y1, y2);
-            exportStat.render(r, x + COL_EXPORT, x + COL_EXPORT + COL_W, y1, y2);
-            delta7Stat.render(r, x + COL_DELTA7, x + COL_DELTA7 + COL_W, y1, y2);
-            sellStat.render(r,   x + COL_SELL,   x + COL_SELL   + COL_W, y1, y2);
-            avgStat.render(r,    x + COL_AVG,    x + COL_AVG    + COL_W, y1, y2);
+            stat(spoilStat,  x, Col.SPOIL,  y1, y2, r);
+            stat(maintStat,  x, Col.MAINT,  y1, y2, r);
+            stat(importStat, x, Col.IMPORT, y1, y2, r);
+            stat(exportStat, x, Col.EXPORT, y1, y2, r);
+            stat(delta7Stat, x, Col.DELTA7, y1, y2, r);
+            stat(sellStat,   x, Col.SELL,   y1, y2, r);
+            stat(avgStat,    x, Col.AVG,    y1, y2, r);
+        }
+
+        /** Right-align a GStat within the column's inner padding box. */
+        private void stat(GStat s, int x, Col c, int y1, int y2, SPRITE_RENDERER r) {
+            s.render(r, x + c.x + PAD, x + c.x + c.w - PAD, y1, y2);
+        }
+
+        private boolean inCol(int relX, Col c) {
+            return relX >= c.x && relX < c.x + c.w;
+        }
+
+        /** Hit box for the hide/restore marker: the NAME column's right gutter. */
+        private boolean inMarker(int relX) {
+            return relX >= Col.NAME.x + Col.NAME.w - IND_W - PAD
+                    && relX <  Col.NAME.x + Col.NAME.w;
         }
 
         @Override
@@ -721,7 +1140,9 @@ public final class EconomyPanel extends IFullView {
                 b.error(prob);
             }
             b.NL(8);
-            b.textL("Click to open trade panel");
+            b.textL("Click Stored/Fill% → storage, Sell@now/Best@avail → trade");
+            b.NL();
+            b.textL(isHidden(res) ? "Click + (name) → restore this row" : "Click x (name) → hide this row");
         }
 
         private GText statusFlag(int status) {
@@ -752,7 +1173,8 @@ public final class EconomyPanel extends IFullView {
         }
 
         private boolean isDefaultView() {
-            return sortCol == SortCol.NAME && sortAsc
+            // Category separators only make sense in the grouped (category) ordering
+            return sortCol == SortCol.NAME && nameSort == NameSort.CATEGORY
                     && !filterDeficit && !filterFood
                     && (searchSprite == null || searchSprite.text().length() == 0);
         }
