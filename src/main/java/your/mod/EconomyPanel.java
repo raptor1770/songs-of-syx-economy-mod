@@ -145,7 +145,7 @@ public final class EconomyPanel extends IFullView {
     private RENDEROBJ        manualPage;
 
     public EconomyPanel() {
-        super("Economy Overview", UI.icons().l.crate);
+        super("Economy Overview", UI.icons().l.book);
         section.body().setWidth(WIDTH).setHeight(0);
 
         loadConfig();
@@ -153,14 +153,12 @@ public final class EconomyPanel extends IFullView {
         buildAllRows();
 
         GuiSection filterBar = buildFilterBar();
-        // Totals row is pinned at HEIGHT - ROW_H; scroll gets remaining space minus gaps
-        int scrollH = HEIGHT - filterBar.body().height() - 2 * ROW_H - 16;
+        int scrollH = HEIGHT - filterBar.body().height() - ROW_H - 16;
         scroll = new FilterableScroll(rowsArray, scrollH, WIDTH);
 
         section.addDown(0, filterBar);
         section.addDown(4, buildHeaderRow());
         section.addDown(4, scroll.view());
-        section.add(buildTotalsRow(), 0, HEIGHT - ROW_H);
     }
 
     // ── Row initialization ───────────────────────────────────────────────────
@@ -309,11 +307,6 @@ public final class EconomyPanel extends IFullView {
             "Best price any reachable faction would pay, including factions you do not yet "
             + "trade with. Shown green when it beats Sell@now - a better deal is available. "
             + "Click to open it."));
-        rows.add(manualEntry(W, "Totals row",
-            "Sum Net/d = sum of (30-day net x sell price) over visible rows; Sum Value = "
-            + "stored x sell price; Food = total stored food / total daily food eaten. "
-            + "Hidden rows are excluded from the totals."));
-
         rows.add(manualEntry(W, "Hiding rows  (the x)",
             "Hover a row and click the small \"x\" at the right of the Resource name to hide "
             + "it. Hidden rows drop out of the list and the totals. Your choices are saved "
@@ -624,10 +617,10 @@ public final class EconomyPanel extends IFullView {
     /** Render a runway day-count into a cell, capping the display at {@link #RUNWAY_CAP}. */
     private static void renderRunway(GText text, double net, RESOURCE res) {
         if (net >= 0) { text.add("+"); text.color(GCOLOR.T().IGOOD); return; }
-        text.normalify();
         double stored = SETT.ROOMS().STOCKPILE.tally().amountTotal(res);
-        if (stored <= 0) { GFORMAT.i(text, 0L); return; }
+        if (stored <= 0) { text.errorify(); GFORMAT.i(text, 0L); return; }
         long days = (long) (stored / -net);
+        if (days <= LOW_RUNWAY_DAYS) text.errorify(); else text.normalify();
         if (days > RUNWAY_CAP) {
             GFORMAT.i(text, RUNWAY_CAP);
             text.add("+");
@@ -790,99 +783,6 @@ public final class EconomyPanel extends IFullView {
         };
     }
 
-    // ── Totals row (Milestone 9) ─────────────────────────────────────────────
-
-    private RENDEROBJ buildTotalsRow() {
-        GText totalsLabel  = new GText(UI.FONT().S, "TOTALS").lablify();
-        GText netGoldLabel = new GText(UI.FONT().S, "Net/d:").lablifySub();
-        GText valueLabel   = new GText(UI.FONT().S, "Value:").lablifySub();
-        GText foodLabel    = new GText(UI.FONT().S, "Food:").lablifySub();
-
-        // Σ Net gold/day = sum(avg30dNet(res) * sellNow(res)) over visible rows
-        GStat netGoldStat = new GStat() {
-            @Override public void update(GText text) {
-                long total = 0;
-                for (ResourceRow rr : resourceRows) {
-                    if (!isVisible(rr.res)) continue;
-                    total += avg30dNet(rr.res) * (long) sellNow(rr.res);
-                }
-                GFORMAT.iIncr(text, total);
-            }
-        };
-
-        // Σ Value = sum(stored * sellNow(res)) over visible rows
-        GStat valueStat = new GStat() {
-            @Override public void update(GText text) {
-                long total = 0;
-                for (ResourceRow rr : resourceRows) {
-                    if (!isVisible(rr.res)) continue;
-                    total += (long) SETT.ROOMS().STOCKPILE.tally().amountTotal(rr.res)
-                             * (long) sellNow(rr.res);
-                }
-                text.normalify();
-                GFORMAT.i(text, total);
-            }
-        };
-
-        // Days of food = sum(storedEDI) / sum(dailyFoodConsumption) — always over all EDI()
-        GStat foodDaysStat = new GStat() {
-            @Override public void update(GText text) {
-                long storedFood = 0;
-                long dailyCons  = 0;
-                for (RESOURCE res : RESOURCES.EDI().res()) {
-                    storedFood += (long) SETT.ROOMS().STOCKPILE.tally().amountTotal(res);
-                    for (Source s : SETT.ROOMS().PROD.consumers(res)) dailyCons += (long) s.am();
-                }
-                text.normalify();
-                if (dailyCons <= 0) {
-                    text.add("--");
-                } else {
-                    GFORMAT.i(text, storedFood / dailyCons);
-                    text.add("d");
-                }
-            }
-        };
-
-        final int LBL_GAP   = 4;
-        final int STAT_W    = Col.NET30.w + 20;
-        // Positions for the three aggregate groups (left edge of label)
-        final int X_NET     = Col.NET30.x;
-        final int X_VALUE   = Col.SELL.x;
-        final int X_FOOD    = Col.AVG.x + Col.AVG.w + 8;
-
-        return new RENDEROBJ.RenderImp(WIDTH, ROW_H) {
-            @Override public void render(SPRITE_RENDERER r, float ds) {
-                int x  = body.x1();
-                int y1 = body.y1();
-                int y2 = body.y2();
-                int yT = y1 + (ROW_H - totalsLabel.height()) / 2;
-
-                GCOLOR.UI().NORMAL.normal.render(r, x, x + WIDTH, y1, y2);
-                COLOR.WHITE35.render(r, x, x + WIDTH, y1, y1 + 1);
-
-                totalsLabel.render(r, x + Col.NAME.x + Icon.S + 8, yT);
-
-                netGoldLabel.render(r, x + X_NET, yT);
-                netGoldStat.render(r,
-                    x + X_NET + netGoldLabel.width() + LBL_GAP,
-                    x + X_NET + netGoldLabel.width() + LBL_GAP + STAT_W,
-                    y1, y2);
-
-                valueLabel.render(r, x + X_VALUE, yT);
-                valueStat.render(r,
-                    x + X_VALUE + valueLabel.width() + LBL_GAP,
-                    x + X_VALUE + valueLabel.width() + LBL_GAP + STAT_W,
-                    y1, y2);
-
-                foodLabel.render(r, x + X_FOOD, yT);
-                foodDaysStat.render(r,
-                    x + X_FOOD + foodLabel.width() + LBL_GAP,
-                    x + X_FOOD + foodLabel.width() + LBL_GAP + STAT_W,
-                    y1, y2);
-            }
-        };
-    }
-
     // ── ResourceRow ──────────────────────────────────────────────────────────
 
     private class ResourceRow extends CLICKABLE.ClickableAbs {
@@ -949,19 +849,19 @@ public final class EconomyPanel extends IFullView {
             spoilStat = new GStat() {
                 @Override public void update(GText text) {
                     long v = lastDayOut(RTYPE.SPOILAGE, res);
-                    if (v > 0) GFORMAT.i(text, v);
+                    if (v > 0) { text.warnify(); GFORMAT.i(text, v); }
                 }
             };
             maintStat = new GStat() {
                 @Override public void update(GText text) {
                     long v = lastDayOut(RTYPE.MAINTENANCE, res);
-                    if (v > 0) GFORMAT.i(text, v);
+                    if (v > 0) { text.warnify(); GFORMAT.i(text, v); }
                 }
             };
             importStat = new GStat() {
                 @Override public void update(GText text) {
                     long v = lastDayIn(RTYPE.TRADE, res);
-                    if (v > 0) GFORMAT.i(text, v);
+                    if (v > 0) { text.color(GCOLOR.T().IGOOD); GFORMAT.i(text, v); }
                 }
             };
             exportStat = new GStat() {

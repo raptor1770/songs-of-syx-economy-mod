@@ -162,9 +162,9 @@
         <!-- These settings will go into the mods _Info.txt file -->
         <mod.version>${project.version}</mod.version>
         <mod.name>Economy Overview</mod.name>
-        <mod.description>Adds a settlement UI button that opens a resource economy overview panel.</mod.description>
-        <mod.author>Tony</mod.author>
-        <mod.info>Economy Overview</mod.info>
+        <mod.description>Adds an ECON button to the settlement top bar that opens a spreadsheet-style resource economy overview. Sort and compare every resource by stored amount, fill%, net flow, runway, spoilage, trade prices, and more — all in one table the vanilla UI cannot show.</mod.description>
+        <mod.author>raptor1770</mod.author>
+        <mod.info>Adds an ECON button to the settlement top bar. Read-only — no save data is modified. Requires V71. Hide individual rows with the x marker; choices persist across restarts. Click Stored/Fill% to open the vanilla storage view; click Sell@now or Best@avail to open the trade screen.</mod.info>
         <!--
             This is the game version you are currently using. When the game updates:
             * Download the new game version if you don't have it
