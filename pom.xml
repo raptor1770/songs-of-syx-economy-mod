@@ -161,10 +161,10 @@
 
         <!-- These settings will go into the mods _Info.txt file -->
         <mod.version>${project.version}</mod.version>
-        <mod.name>Example Mod</mod.name>
-        <mod.description>This is an example mod made by Jake the game developer.</mod.description>
-        <mod.author>Jake</mod.author>
-        <mod.info>Example</mod.info>
+        <mod.name>Economy Overview</mod.name>
+        <mod.description>Adds a settlement UI button that opens a resource economy overview panel.</mod.description>
+        <mod.author>Tony</mod.author>
+        <mod.info>Economy Overview</mod.info>
         <!--
             This is the game version you are currently using. When the game updates:
             * Download the new game version if you don't have it
@@ -174,8 +174,8 @@
             * Run a "mvn validate" to install the new version in the local maven repository
             * Maven is then able to find and resolve the new Songs of Syx code
          -->
-        <game.version.major>70</game.version.major>
-        <game.version.minor>32</game.version.minor>
+        <game.version.major>71</game.version.major>
+        <game.version.minor>33</game.version.minor>
 
         <!-- Mod SDK (this only applies when "mod-sdk" profile is enabled) -->
         <mod.sdk.version>0</mod.sdk.version>
@@ -296,6 +296,47 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-shade-plugin</artifactId>
                     <version>${maven-shade-plugin.version}</version>
+                </plugin>
+                <!-- Tell VS Code / m2e to ignore plugin executions it can't map to IDE build steps -->
+                <plugin>
+                    <groupId>org.eclipse.m2e</groupId>
+                    <artifactId>lifecycle-mapping</artifactId>
+                    <version>1.0.0</version>
+                    <configuration>
+                        <lifecycleMappingMetadata>
+                            <pluginExecutions>
+                                <pluginExecution>
+                                    <pluginExecutionFilter>
+                                        <groupId>org.apache.maven.plugins</groupId>
+                                        <artifactId>maven-install-plugin</artifactId>
+                                        <versionRange>[3.0,)</versionRange>
+                                        <goals><goal>install-file</goal></goals>
+                                    </pluginExecutionFilter>
+                                    <action><ignore/></action>
+                                </pluginExecution>
+                                <pluginExecution>
+                                    <pluginExecutionFilter>
+                                        <groupId>org.apache.maven.plugins</groupId>
+                                        <artifactId>maven-shade-plugin</artifactId>
+                                        <versionRange>[3.0,)</versionRange>
+                                        <goals><goal>shade</goal></goals>
+                                    </pluginExecutionFilter>
+                                    <action><ignore/></action>
+                                </pluginExecution>
+                                <pluginExecution>
+                                    <pluginExecutionFilter>
+                                        <groupId>org.apache.maven.plugins</groupId>
+                                        <artifactId>maven-resources-plugin</artifactId>
+                                        <versionRange>[3.0,)</versionRange>
+                                        <goals>
+                                            <goal>copy-resources</goal>
+                                        </goals>
+                                    </pluginExecutionFilter>
+                                    <action><ignore/></action>
+                                </pluginExecution>
+                            </pluginExecutions>
+                        </lifecycleMappingMetadata>
+                    </configuration>
                 </plugin>
             </plugins>
         </pluginManagement>
