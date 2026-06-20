@@ -1,2 +1,5 @@
 .idea
 target
+workshop/upload.vdf
+workshop/published_id.txt
+workshop/steamcmd.log
