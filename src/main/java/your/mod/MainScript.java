@@ -26,12 +26,16 @@ public final class MainScript implements SCRIPT {
 
 	@Override
 	public boolean isSelectable() {
-		return SCRIPT.super.isSelectable();
+		// Not a pick-at-new-game option; it's always on (see forceInit).
+		return false;
 	}
 
 	@Override
 	public boolean forceInit() {
-		return SCRIPT.super.forceInit();
+		// Force the script onto all new games AND existing saves, so the ECON
+		// panel works without starting a new game. Safe here because the mod
+		// persists nothing — InstanceScript.save()/load() are empty.
+		return true;
 	}
 
 	@Override
